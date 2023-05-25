@@ -1,0 +1,10 @@
+# cmake build files
+cmake-build-debug
+cmake-build-debugserver
+CMakeFiles
+CMakeCache.txt
+Makefile
+*.cmake
+
+# ide generate files
+.idea
