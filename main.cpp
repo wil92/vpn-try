@@ -176,11 +176,6 @@ void *handleApplicationConnection(void *args) {
         buff[numBytes] = '\0';
 
         sc.redirectDataToServer(buff);
-//        in_addr_t addr;
-//        in_port_t port;
-//        char addrMsg[20];
-//        inet_ntop(AF_INET, &addr, addrMsg, sizeof(addrMsg));
-//        std::cout << "Socket: " << sockFd << ", Addr:" << addrMsg << ", Port: " << port << ", Message: " << std::endl;
     }
 
     return nullptr;
