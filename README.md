@@ -9,6 +9,12 @@ sudo iptables -t nat -A OUTPUT -j REDIRECT -p tcp --to-port 4333
 # redirect particular trafic to the application
 sudo iptables -t nat -A OUTPUT -j REDIRECT -p tcp --to-port 4333
 
+# redirect google traffic to the application
+sudo iptables -t nat -A OUTPUT -p tcp -d 142.250.184.206 --dport 80 -j REDIRECT --to-port 4333 -m owner ! --uid-owner root 
+
+# list iptables rules created
+sudo iptables -t nat -L
+
 # clear iptables
 sudo iptables -t nat -F
 ```
@@ -27,3 +33,9 @@ sudo iptables -t nat -F
 | message                 |
 |-------------------------|
 | base68::encode(message) |
+
+## ToDo
+
+- [ ] Create scripts to handle iptables
+  1. Create iptables rules to redirect traffic to the application
+  2. Remove previously created iptables rules

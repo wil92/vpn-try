@@ -65,12 +65,82 @@ void listeningOnPort(int port, void (*newConnection)(void *args)) {
     }
 }
 
+void *handleDestMsg(void *args) {
+    int sockFd = *(int *) args;
+    std::cout << "connected to destination with socket " << sockFd << std::endl;
+
+    char buff[MAX_DATA_SIZE];
+    ssize_t numBytes;
+    while (true) {
+        if ((numBytes = recv(sockFd, buff, MAX_DATA_SIZE - 20, 0)) == -1) {
+            handle_error("receiving message");
+        }
+        if (numBytes == 0) {
+            std::cout << "Socket: " << sockFd << " is disconnected" << std::endl;
+            break;
+        }
+        buff[numBytes] = '\0';
+
+        std::cout << "Destination msg: " << buff << std::endl;
+    }
+
+    return nullptr;
+}
+
+struct destConnection {
+private:
+    int sockfd;
+    struct sockaddr_in addr{};
+    bool isConnected = false;
+public:
+    int clientSockFd;
+    in_addr_t addrRedirection;
+    in_port_t portRedirection;
+
+    void createRecvThread() {
+        pthread_t newThread = pthread_t();
+        int sockets[2] = {sockfd, clientSockFd};
+        pthread_create(&newThread, NULL, &handleDestMsg, sockets);
+    }
+
+    void connectToDestination() {
+        if (!isConnected) {
+            isConnected = true;
+
+            sockfd = socket(AF_INET, SOCK_STREAM, 0);
+
+            memset(&addr, 0, sizeof(addr));
+            addr.sin_family = AF_INET;
+            addr.sin_port = portRedirection;
+            addr.sin_addr.s_addr = addrRedirection;
+//          addr.sin_addr.s_addr = inet_addr("207.180.211.97");
+
+            if (connect(sockfd, (sockaddr *) &addr, sizeof(addr)) == -1) {
+                handle_error("connect");
+            }
+
+            char addrMsg[20];
+            inet_ntop(AF_INET, &addrRedirection, addrMsg, sizeof(addrMsg));
+            std::cout << "Connected to Addr:" << addrMsg << ", Port: " << ntohs(portRedirection) << std::endl;
+
+            createRecvThread();
+        }
+    }
+
+    void sendData(char *data, int dataLen) {
+        ssize_t res = send(sockfd, data, dataLen, 0);
+        if (res == -1) {
+            handle_error("recv destination");
+        }
+    }
+};
+
 void *handleClientConnection(void *args) {
     int sockFd = *(int *) args;
     std::cout << "connected to client with socket " << sockFd << std::endl;
 
-    in_addr_t addrRedirection;
-    in_port_t portRedirection;
+    destConnection dc{};
+    dc.clientSockFd = sockFd;
 
     char buff[MAX_DATA_SIZE];
     ssize_t numBytes;
@@ -86,11 +156,10 @@ void *handleClientConnection(void *args) {
         char message[MAX_DATA_SIZE];
         int messageLen;
 
-        protocol::from(&addrRedirection, &portRedirection, buff, (int) numBytes, message, &messageLen);
-        char addrMsg[20];
-        inet_ntop(AF_INET, &addrRedirection, addrMsg, sizeof(addrMsg));
-        std::cout << "Socket: " << sockFd << ", Addr:" << addrMsg << ", Port: " << ntohs(portRedirection) << ", Message: " << message
-                  << std::endl;
+        protocol::from(&dc.addrRedirection, &dc.portRedirection, buff, (int) numBytes, message, &messageLen);
+
+        dc.connectToDestination();
+        dc.sendData(message, messageLen);
     }
 
     return nullptr;
@@ -132,7 +201,7 @@ public:
         }
     }
 
-    void redirectDataToServer(char *msg) {
+    void sendData(char *msg) {
         char buffer[1000];
         int bufferLen = 0;
         if (firstMessage) {
@@ -149,7 +218,6 @@ public:
             handle_error("recv");
         }
         std::cout << buffer << std::endl;
-        sleep(1);
     }
 };
 
@@ -175,7 +243,7 @@ void *handleApplicationConnection(void *args) {
         }
         buff[numBytes] = '\0';
 
-        sc.redirectDataToServer(buff);
+        sc.sendData(buff);
     }
 
     return nullptr;
