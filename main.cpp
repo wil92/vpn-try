@@ -17,11 +17,14 @@
 #include <iostream>
 #include <cstring>
 #include <unistd.h>
+#include <stdlib.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <linux/netfilter_ipv4.h>
 #include <arpa/inet.h>
 #include <pthread.h>
+#include "base64.cpp"
+#include "protocol.cpp"
 
 #define LISTEN_BACKLOG 50
 #define MAX_DATA_SIZE 100
@@ -31,13 +34,14 @@
 int serverPortNo = 4332;
 int clientPortNo = 4333;
 
-void listeningOnPort(int port, void *args, void (*newConnection)(void *args)) {
+void listeningOnPort(int port, void (*newConnection)(void *args)) {
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
 
     struct sockaddr_in addr{};
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
+//    addr.sin_addr.s_addr = inet_addr("207.180.211.97");
     // depending on the system modify the function to call (in mac is different)
     addr.sin_port = htons(port);
 
@@ -57,22 +61,21 @@ void listeningOnPort(int port, void *args, void (*newConnection)(void *args)) {
         if (socknew == -1) {
             handle_error("accept");
         }
-        void *passThrow = &socknew;
-        (((int*)args) + 1) = args;
-        newConnection(passThrow);
+        newConnection(&socknew);
     }
 }
-
-#ifdef SERVER
 
 void *handleClientConnection(void *args) {
     int sockFd = *(int *) args;
     std::cout << "connected to client with socket " << sockFd << std::endl;
 
+    in_addr_t addrRedirection;
+    in_port_t portRedirection;
+
     char buff[MAX_DATA_SIZE];
     ssize_t numBytes;
     while (true) {
-        if ((numBytes = recv(sockFd, buff, MAX_DATA_SIZE - 1, 0)) == -1) {
+        if ((numBytes = recv(sockFd, buff, MAX_DATA_SIZE - 20, 0)) == -1) {
             handle_error("receiving message");
         }
         if (numBytes == 0) {
@@ -80,28 +83,20 @@ void *handleClientConnection(void *args) {
             break;
         }
         buff[numBytes] = '\0';
-        std::cout << "Socket: " << sockFd << ", Message: " << buff << std::endl;
+        char message[MAX_DATA_SIZE];
+        int messageLen;
+
+        protocol::from(&addrRedirection, &portRedirection, buff, (int) numBytes, message, &messageLen);
+        char addrMsg[20];
+        inet_ntop(AF_INET, &addrRedirection, addrMsg, sizeof(addrMsg));
+        std::cout << "Socket: " << sockFd << ", Addr:" << addrMsg << ", Port: " << ntohs(portRedirection) << ", Message: " << message
+                  << std::endl;
     }
 
     return nullptr;
 }
 
-void createNewConnectionThread(int *sockfd) {
-    pthread_t newThread = pthread_t();
-    pthread_create(&newThread, nullptr, &handleClientConnection, sockfd);
-}
-
-int main() {
-    std::cout << "Server started" << std::endl;
-
-    listeningOnPort(serverPortNo, createNewConnectionThread);
-
-    return 0;
-}
-
-#else
-
-void getAddrDest(int fd, struct sockaddr_in *dest) {
+void extractDestAddr(int fd, struct sockaddr_in *dest) {
     socklen_t destLen = sizeof(*dest);
     if (getsockopt(fd, SOL_IP, SO_ORIGINAL_DST, dest, &destLen) == -1) {
         std::cout << "Error with getAddrDest" << std::endl;
@@ -114,12 +109,59 @@ void getAddrDest(int fd, struct sockaddr_in *dest) {
     std::cout << "-----------------------" << std::endl;
 }
 
-void *handleConnection(void *args) {
+struct serverConnection {
+private:
+    int sockfd;
+    struct sockaddr_in addr{};
+    struct sockaddr_in addrOriginal;
+    bool firstMessage = true;
+public:
+    explicit serverConnection(const sockaddr_in &addrOriginal) : addrOriginal(addrOriginal) {}
+
+    void connectToServer() {
+        sockfd = socket(AF_INET, SOCK_STREAM, 0);
+
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(serverPortNo);
+        addr.sin_addr.s_addr = INADDR_ANY;
+//      addr.sin_addr.s_addr = inet_addr("207.180.211.97");
+
+        if (connect(sockfd, (sockaddr *) &addr, sizeof(addr)) == -1) {
+            handle_error("connect");
+        }
+    }
+
+    void redirectDataToServer(char *msg) {
+        char buffer[1000];
+        int bufferLen = 0;
+        if (firstMessage) {
+            firstMessage = false;
+            protocol::to(&addrOriginal.sin_addr.s_addr, &addrOriginal.sin_port, msg, (int) strlen(msg), buffer,
+                         &bufferLen);
+        } else {
+            protocol::to(nullptr, nullptr, msg, (int) strlen(msg), buffer,
+                         &bufferLen);
+        }
+        ssize_t res = send(sockfd, buffer, bufferLen, 0);
+        std::cout << res << std::endl;
+        if (res == -1) {
+            handle_error("recv");
+        }
+        std::cout << buffer << std::endl;
+        sleep(1);
+    }
+};
+
+void *handleApplicationConnection(void *args) {
     int sockFd = *(int *) args;
-    std::cout << "connected to client with socket " << sockFd << std::endl;
+    std::cout << "connected to application with socket " << sockFd << std::endl;
 
     sockaddr_in originalDest = sockaddr_in();
-    getAddrDest(sockFd, &originalDest);
+    extractDestAddr(sockFd, &originalDest);
+
+    serverConnection sc{originalDest};
+    sc.connectToServer();
 
     char buff[MAX_DATA_SIZE];
     ssize_t numBytes;
@@ -132,47 +174,60 @@ void *handleConnection(void *args) {
             break;
         }
         buff[numBytes] = '\0';
-        std::cout << "Socket: " << sockFd << ", Message: " << buff << std::endl;
+
+        sc.redirectDataToServer(buff);
+//        in_addr_t addr;
+//        in_port_t port;
+//        char addrMsg[20];
+//        inet_ntop(AF_INET, &addr, addrMsg, sizeof(addrMsg));
+//        std::cout << "Socket: " << sockFd << ", Addr:" << addrMsg << ", Port: " << port << ", Message: " << std::endl;
     }
 
     return nullptr;
 }
 
-void createNewConnectionThread(void *args) {
-    int *sockFd = (int *)args;
+void createNewClientConnectionThread(void *args) {
     pthread_t newThread = pthread_t();
-    pthread_create(&newThread, nullptr, &handleConnection, sockFd);
+    pthread_create(&newThread, nullptr, &handleClientConnection, args);
 }
 
-int main() {
+void createNewApplicationConnectionThread(void *args) {
+    pthread_t newThread = pthread_t();
+    pthread_create(&newThread, nullptr, &handleApplicationConnection, args);
+}
+
+int startServer() {
+    std::cout << "Server started" << std::endl;
+
+    listeningOnPort(serverPortNo, createNewClientConnectionThread);
+
+    return 0;
+}
+
+int startClient() {
     std::cout << "Client started" << std::endl;
 
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    listeningOnPort(clientPortNo, createNewApplicationConnectionThread);
 
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(serverPortNo);
-    addr.sin_addr.s_addr = INADDR_ANY;
-//    addr.sin_addr.s_addr = inet_addr("207.180.211.97");
+    return 0;
+}
 
-    if (connect(sockfd, (sockaddr *) &addr, sizeof(addr)) == -1) {
-        handle_error("connect");
+int main(int argc, char *argv[]) {
+    bool serverMode = false;
+
+    // check application arguments
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--server-mode") == 0) {
+            serverMode = true;
+        }
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            // todo: show help here
+            return 0;
+        }
     }
 
-    listeningOnPort(clientPortNo, NULL, createNewConnectionThread);
-
-//    while (true)
-//    {
-//        char* buffer = "Hello world!!!";
-//        size_t bufferSize = strlen(buffer);
-//        ssize_t res = send(sockfd, buffer, bufferSize, 0);
-//        std::cout<<res<<std::endl;
-//        if (res == -1) {
-//            handle_error("recv");
-//        }
-//        std::cout<<buffer<<std::endl;
-//        sleep(1);
-//    }
+    if (serverMode) {
+        return startServer();
+    }
+    return startClient();
 }
-#endif

@@ -4,7 +4,6 @@ cmake-build-debugserver
 CMakeFiles
 CMakeCache.txt
 Makefile
-*.cmake
 
 # ide generate files
 .idea
