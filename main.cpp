@@ -18,21 +18,27 @@
 #include <cstring>
 #include <unistd.h>
 #include <stdlib.h>
+#include <utility>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <linux/netfilter_ipv4.h>
 #include <arpa/inet.h>
 #include <pthread.h>
+#include <semaphore.h>
 #include "base64.cpp"
 #include "protocol.cpp"
 
 #define LISTEN_BACKLOG 50
 #define MAX_DATA_SIZE 100
 
+#define socks_t std::pair<int, int>
+
 #define handle_error(msg) do { perror(msg); exit(EXIT_FAILURE); } while (0)
 
 int serverPortNo = 4332;
 int clientPortNo = 4333;
+
+sem_t s;
 
 void listeningOnPort(int port, void (*newConnection)(void *args)) {
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -66,22 +72,35 @@ void listeningOnPort(int port, void (*newConnection)(void *args)) {
 }
 
 void *handleDestMsg(void *args) {
-    int sockFd = *(int *) args;
+    socks_t socks = *((socks_t *) args);
+    int sockFd = socks.first;
+    int sockClientFd = socks.second;
+    std::cout << "--------- " << sockClientFd << std::endl;
     std::cout << "connected to destination with socket " << sockFd << std::endl;
+
+    sem_post(&s);
 
     char buff[MAX_DATA_SIZE];
     ssize_t numBytes;
     while (true) {
+        std::cout << "hereeeeeeeeeeeeeeeeeee" << std::endl;
         if ((numBytes = recv(sockFd, buff, MAX_DATA_SIZE - 20, 0)) == -1) {
-            handle_error("receiving message");
+            handle_error("receiving msg");
         }
         if (numBytes == 0) {
             std::cout << "Socket: " << sockFd << " is disconnected" << std::endl;
+            close(sockClientFd);
             break;
         }
         buff[numBytes] = '\0';
 
         std::cout << "Destination msg: " << buff << std::endl;
+        char msg[1000];
+        int msgLen;
+        protocol::to(nullptr, nullptr, buff, (int) numBytes, msg, &msgLen);
+        if (send(sockClientFd, msg, msgLen, 0) == -1) {
+            handle_error("sending destination response");
+        }
     }
 
     return nullptr;
@@ -99,12 +118,14 @@ public:
 
     void createRecvThread() {
         pthread_t newThread = pthread_t();
-        int sockets[2] = {sockfd, clientSockFd};
-        pthread_create(&newThread, NULL, &handleDestMsg, sockets);
+        socks_t socks{sockfd, clientSockFd};
+        std::cout << "//////// " << clientSockFd << std::endl;
+        pthread_create(&newThread, NULL, &handleDestMsg, &socks);
     }
 
     void connectToDestination() {
         if (!isConnected) {
+            sem_init(&s, 0, 0);
             isConnected = true;
 
             sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -121,17 +142,21 @@ public:
 
             char addrMsg[20];
             inet_ntop(AF_INET, &addrRedirection, addrMsg, sizeof(addrMsg));
-            std::cout << "Connected to Addr:" << addrMsg << ", Port: " << ntohs(portRedirection) << std::endl;
+            std::cout << "Connected to Addr:" << addrMsg << ", Port: " << ntohs(portRedirection) << ", Sock: " << sockfd
+                      << std::endl;
 
             createRecvThread();
         }
     }
 
     void sendData(char *data, int dataLen) {
+        sem_wait(&s);
         ssize_t res = send(sockfd, data, dataLen, 0);
+        std::cout << "sent data to destination, Sock: " << sockfd << std::endl;
         if (res == -1) {
             handle_error("recv destination");
         }
+        sem_post(&s);
     }
 };
 
@@ -141,6 +166,7 @@ void *handleClientConnection(void *args) {
 
     destConnection dc{};
     dc.clientSockFd = sockFd;
+    std::cout << "++++++++ " << sockFd << std::endl;
 
     char buff[MAX_DATA_SIZE];
     ssize_t numBytes;
@@ -178,6 +204,37 @@ void extractDestAddr(int fd, struct sockaddr_in *dest) {
     std::cout << "-----------------------" << std::endl;
 }
 
+void *handleServerMsg(void *args) {
+    socks_t socks = *((socks_t *) args);
+    int sockFd = socks.first;
+    int sockApplicationFd = socks.second;
+    std::cout << "connected to server waiting form response in socket: " << sockFd << std::endl;
+
+    char buff[MAX_DATA_SIZE];
+    ssize_t numBytes;
+    while (true) {
+        if ((numBytes = recv(sockFd, buff, MAX_DATA_SIZE - 20, 0)) == -1) {
+            handle_error("receiving message");
+        }
+        if (numBytes == 0) {
+            std::cout << "Socket: " << sockFd << " is disconnected" << std::endl;
+            close(sockApplicationFd);
+            break;
+        }
+        buff[numBytes] = '\0';
+
+        char msg[1000];
+        int msgLen;
+        protocol::from(nullptr, nullptr, buff, (int) numBytes, msg, &msgLen);
+        std::cout << "Server msg: " << msg << std::endl;
+        if (send(sockApplicationFd, msg, msgLen, 0) == -1) {
+            handle_error("sending destination response");
+        }
+    }
+
+    return nullptr;
+}
+
 struct serverConnection {
 private:
     int sockfd;
@@ -185,7 +242,15 @@ private:
     struct sockaddr_in addrOriginal;
     bool firstMessage = true;
 public:
+    int applicationSockFd;
+
     explicit serverConnection(const sockaddr_in &addrOriginal) : addrOriginal(addrOriginal) {}
+
+    void createRecvThread() {
+        pthread_t newThread = pthread_t();
+        socks_t socks{sockfd, applicationSockFd};
+        pthread_create(&newThread, NULL, &handleServerMsg, &socks);
+    }
 
     void connectToServer() {
         sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -199,6 +264,8 @@ public:
         if (connect(sockfd, (sockaddr *) &addr, sizeof(addr)) == -1) {
             handle_error("connect");
         }
+
+        createRecvThread();
     }
 
     void sendData(char *msg) {
@@ -230,6 +297,7 @@ void *handleApplicationConnection(void *args) {
 
     serverConnection sc{originalDest};
     sc.connectToServer();
+    sc.applicationSockFd = sockFd;
 
     char buff[MAX_DATA_SIZE];
     ssize_t numBytes;
