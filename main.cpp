@@ -19,13 +19,17 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <utility>
+#include <map>
+
 #include <sys/socket.h>
+#include <poll.h>
 #include <netinet/in.h>
 #include <linux/netfilter_ipv4.h>
 #include <arpa/inet.h>
+
 #include <pthread.h>
 #include <semaphore.h>
-#include "base64.cpp"
+
 #include "protocol.cpp"
 
 #define LISTEN_BACKLOG 50
@@ -38,7 +42,12 @@
 int serverPortNo = 4332;
 int clientPortNo = 4333;
 
-sem_t s;
+std::map<int, sem_t*> sems;
+void addSem(sem_t *s, int sock) {
+    sem_init(s, 0, 0);
+    sems.insert(std::make_pair(sock, s));
+}
+//sem_t s;
 
 void listeningOnPort(int port, void (*newConnection)(void *args)) {
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -78,18 +87,22 @@ void *handleDestMsg(void *args) {
     std::cout << "--------- " << sockClientFd << std::endl;
     std::cout << "connected to destination with socket " << sockFd << std::endl;
 
-    sem_post(&s);
+    sem_t *s = sems.find(sockFd)->second;
+    sem_post(s);
 
     char buff[MAX_DATA_SIZE];
-    ssize_t numBytes;
+//    struct pollfd check{sockFd, POLLIN};
     while (true) {
-        std::cout << "hereeeeeeeeeeeeeeeeeee" << std::endl;
-        if ((numBytes = recv(sockFd, buff, MAX_DATA_SIZE - 20, 0)) == -1) {
+        ssize_t numBytes;
+//        poll(&check, 1, 1000);
+
+        if ((numBytes = recv(sockFd, buff, MAX_DATA_SIZE - 35, 0)) == -1) {
             handle_error("receiving msg");
         }
         if (numBytes == 0) {
             std::cout << "Socket: " << sockFd << " is disconnected" << std::endl;
             close(sockClientFd);
+            sems.erase(sockFd);
             break;
         }
         buff[numBytes] = '\0';
@@ -111,6 +124,7 @@ private:
     int sockfd;
     struct sockaddr_in addr{};
     bool isConnected = false;
+    sem_t s;
 public:
     int clientSockFd;
     in_addr_t addrRedirection;
@@ -125,10 +139,11 @@ public:
 
     void connectToDestination() {
         if (!isConnected) {
-            sem_init(&s, 0, 0);
             isConnected = true;
 
             sockfd = socket(AF_INET, SOCK_STREAM, 0);
+
+            addSem(&s, sockfd);
 
             memset(&addr, 0, sizeof(addr));
             addr.sin_family = AF_INET;
@@ -171,7 +186,7 @@ void *handleClientConnection(void *args) {
     char buff[MAX_DATA_SIZE];
     ssize_t numBytes;
     while (true) {
-        if ((numBytes = recv(sockFd, buff, MAX_DATA_SIZE - 20, 0)) == -1) {
+        if ((numBytes = recv(sockFd, buff, MAX_DATA_SIZE, 0)) == -1) {
             handle_error("receiving message");
         }
         if (numBytes == 0) {
@@ -183,6 +198,8 @@ void *handleClientConnection(void *args) {
         int messageLen;
 
         protocol::from(&dc.addrRedirection, &dc.portRedirection, buff, (int) numBytes, message, &messageLen);
+
+        std::cout << "- " << message << std::endl;
 
         dc.connectToDestination();
         dc.sendData(message, messageLen);
@@ -208,17 +225,22 @@ void *handleServerMsg(void *args) {
     socks_t socks = *((socks_t *) args);
     int sockFd = socks.first;
     int sockApplicationFd = socks.second;
+    std::cout << "AAAA server: " << sockFd << ", app: " << sockApplicationFd << std::endl;
     std::cout << "connected to server waiting form response in socket: " << sockFd << std::endl;
+
+    sem_t *s = sems.find(sockFd)->second;
+    sem_post(s);
 
     char buff[MAX_DATA_SIZE];
     ssize_t numBytes;
     while (true) {
-        if ((numBytes = recv(sockFd, buff, MAX_DATA_SIZE - 20, 0)) == -1) {
+        if ((numBytes = recv(sockFd, buff, MAX_DATA_SIZE, 0)) == -1) {
             handle_error("receiving message");
         }
         if (numBytes == 0) {
             std::cout << "Socket: " << sockFd << " is disconnected" << std::endl;
             close(sockApplicationFd);
+            sems.erase(sockFd);
             break;
         }
         buff[numBytes] = '\0';
@@ -241,6 +263,7 @@ private:
     struct sockaddr_in addr{};
     struct sockaddr_in addrOriginal;
     bool firstMessage = true;
+    sem_t s;
 public:
     int applicationSockFd;
 
@@ -249,11 +272,14 @@ public:
     void createRecvThread() {
         pthread_t newThread = pthread_t();
         socks_t socks{sockfd, applicationSockFd};
+        std::cout << "AAAA server: " << sockfd << ", app: " << applicationSockFd << std::endl;
         pthread_create(&newThread, NULL, &handleServerMsg, &socks);
     }
 
     void connectToServer() {
         sockfd = socket(AF_INET, SOCK_STREAM, 0);
+
+        addSem(&s, sockfd);
 
         memset(&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
@@ -269,6 +295,7 @@ public:
     }
 
     void sendData(char *msg) {
+        sem_wait(&s);
         char buffer[1000];
         int bufferLen = 0;
         if (firstMessage) {
@@ -284,7 +311,9 @@ public:
         if (res == -1) {
             handle_error("recv");
         }
-        std::cout << buffer << std::endl;
+        std::cout << "-- " << msg << std::endl;
+        std::cout << "---" << buffer << std::endl;
+        sem_post(&s);
     }
 };
 
@@ -296,13 +325,13 @@ void *handleApplicationConnection(void *args) {
     extractDestAddr(sockFd, &originalDest);
 
     serverConnection sc{originalDest};
-    sc.connectToServer();
     sc.applicationSockFd = sockFd;
+    sc.connectToServer();
 
     char buff[MAX_DATA_SIZE];
     ssize_t numBytes;
     while (true) {
-        if ((numBytes = recv(sockFd, buff, MAX_DATA_SIZE - 1, 0)) == -1) {
+        if ((numBytes = recv(sockFd, buff, MAX_DATA_SIZE - 35, 0)) == -1) {
             handle_error("receiving message");
         }
         if (numBytes == 0) {

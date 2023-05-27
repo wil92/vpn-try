@@ -4,16 +4,17 @@ Just a try to make my own vpn, and play around with sockets in c++.
 
 ```
 # redirect all traffic to the application
-sudo iptables -t nat -A OUTPUT -j REDIRECT -p tcp --to-port 4333
-
-# redirect particular trafic to the application
-sudo iptables -t nat -A OUTPUT -j REDIRECT -p tcp --to-port 4333
+sudo iptables -t nat -A OUTPUT -j REDIRECT -p tcp --to-port 4333 -m owner ! --uid-owner root
 
 # redirect google traffic to the application
-sudo iptables -t nat -A OUTPUT -p tcp -d 142.250.184.206 --dport 80 -j REDIRECT --to-port 4333 -m owner ! --uid-owner root 
+sudo iptables -t nat -A OUTPUT -p tcp -d google.com --dport 80 -j REDIRECT --to-port 4333 -m owner ! --uid-owner root 
+sudo iptables -t nat -A OUTPUT -p tcp -d google.com --dport 443 -j REDIRECT --to-port 4333 -m owner ! --uid-owner root 
 
 # list iptables rules created
-sudo iptables -t nat -L
+sudo iptables -t nat -L --line-number
+
+# remove a particular iptable rule
+sudo iptables -t nat -D OUTPUT <line-num>
 
 # clear iptables
 sudo iptables -t nat -F
